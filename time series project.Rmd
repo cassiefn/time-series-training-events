@@ -1,0 +1,308 @@
+---
+title: "ECE Professional Development in Montana"
+subtitle: "A model for understanding the availability of training for Early Childhood Educators"
+author: "Cassie Noble"
+date: "December 12, 2018"
+output:
+  word_document: default
+  html_document: default
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = TRUE, fig.width = 9)
+library(readr)
+library(lubridate)
+library(ggplot2)
+library(ggfortify)
+library(dplyr)
+library(forecast)
+```
+
+```{r, include = FALSE}
+## load in data, reformat, subset
+
+# load in data reformat
+events <- read_csv("TrainingEvents.csv")
+events$EndDate <- as.Date(events$EndDate, format = "%m/%d/%Y")
+
+# pull out year and month
+events <- events %>% mutate(month(EndDate), year(EndDate))
+events$MonthYr <- format(as.Date(events$EndDate), "%Y-%m")
+
+# subset only approved trainings
+eventsSub <- subset(events, Hours != 0)
+eventsSub <- subset(eventsSub, EventStatus == "Completed" | EventStatus == "Approved")
+
+# convert data fields to factors
+eventsSub$`month(EndDate)` <- format(as.factor(eventsSub$`month(EndDate)`))
+eventsSub$`year(EndDate)` <- format(as.factor(eventsSub$`year(EndDate)`))
+eventsSub$MonthYr <- format(as.factor(eventsSub$MonthYr))
+
+# split hours into indicators for distance vs classroom
+eventsSub$ClassroomHours <- 0
+eventsSub$DistanceHours <- 0
+
+for(i in 1:nrow(eventsSub)){
+  if(eventsSub$LocationType[i] == "Classroom"){
+    eventsSub$ClassroomHours[i] <- eventsSub$Hours[i]
+  } else{
+    eventsSub$DistanceHours[i] <- eventsSub$Hours[i]
+  }
+}
+```
+
+```{r, include = FALSE}
+## aggregate data
+
+# aggregate events by year
+countYr <- aggregate(eventsSub$Hours, by = list(eventsSub$`year(EndDate)`), FUN = length)
+fullCountYr <- subset(countYr[8:25,])
+colnames(fullCountYr) <- c("year", "numEvents")
+countYr <- subset(countYr[17:25,])
+colnames(countYr) <- c("year", "numEvents")
+
+# aggregate hours by year
+hoursYr <- aggregate(eventsSub$Hours, by = list(eventsSub$`year(EndDate)`), FUN = sum)
+hoursYr2 <- aggregate(eventsSub$ClassroomHours, by = list(eventsSub$`year(EndDate)`), FUN = sum)
+hoursYr3 <- aggregate(eventsSub$DistanceHours, by = list(eventsSub$`year(EndDate)`), FUN = sum)
+hoursYr <- cbind(hoursYr, hoursYr2, hoursYr3)
+hoursYr <- subset(hoursYr[8:25,])
+hoursYr <- subset(hoursYr, select = -c(Group.1.1, Group.1.2))
+colnames(hoursYr) <- c("year", "totalHours", "classroomHours", "distanceHours")
+
+# aggregate hours by month
+hoursMonthYr <- aggregate(eventsSub$ClassroomHours, by = list(eventsSub$MonthYr), FUN = sum)
+hoursMonthYr <- subset(hoursMonthYr[134:235,])
+colnames(hoursMonthYr) <- c("year-month", "classroomHours")
+```
+
+```{r, include = FALSE}
+## create possible indicator and regression variables
+
+# create indicators for year and month
+hoursMonthYr$year <- 0
+hoursMonthYr$month <- 0
+
+for(i in 1:nrow(hoursMonthYr)){
+  hoursMonthYr$year[i] <- substr(hoursMonthYr$`year-month`[i], start = 1, stop = 4)
+  hoursMonthYr$month[i] <- substr(hoursMonthYr$`year-month`[i], start = 6, stop = 7)
+}
+
+# create indicator for prevous year's distance hours
+hoursMonthYr$prevYrDist <- 0
+for(i in 1:nrow(hoursMonthYr)){
+  for(y in 1:nrow(hoursYr)){
+    if(hoursMonthYr$year[i] == hoursYr$year[y]){
+      hoursMonthYr$prevYrDist[i] <- hoursYr$distanceHours[y]
+    }
+  }
+}
+
+# create indicator for annual training requirement
+hoursMonthYr$PRRequire <- 23
+
+for(i in 85:97){
+  hoursMonthYr$PRRequire[i] <- 24
+}
+
+for(i in 98:102){
+  hoursMonthYr$PRRequire[i] <- 16
+}
+
+# convert to factors
+hoursMonthYr$year <- as.factor(hoursMonthYr$year)
+hoursMonthYr$month <- as.factor(hoursMonthYr$month)
+hoursMonthYr$PRRequire <- as.factor(hoursMonthYr$PRRequire)
+```
+
+### Introduction
+
+There are approximately 18,000 slots available in child care programs in Montana, serving an estimated 40% of the total number of children potentially in need of child care (Child Care Aware of America, 2015) (Watson, 2018). Extensive research has shown the long-term impacts of quality early childhood education and the need for high quality programs (Heckman, 2017). We also know that continued professional development is important to the success of a quality early childhood workforce (OECD). With the help of the Child Care and Development Block Grant Act, as well as a growing national movement, states across the nation are moving towards higher standards when it comes to professional development in the early care and education profession.
+
+The Montana Early Childhood Project (ECP) is the statewide Professional Development Approval System for the early care and education workforce of Montana. The ECP also operates a statewide registry, the Practitioner Registry, to promote quality childcare and to collect workforce information about early childhood providers. Montana Child Care Licensing rule was rewritten in 2018 to require participation in the Practitioner Registry, and to increase the number of required professional development training for all licensed providers from 8 to 16 hours annually. The Practitioner Registry previously was required for individuals participating the Quality Rating Improvement System (QRIS), but was voluntary for most. Required annual training hours for the Practitioner Registry has varied over the years, but most recently required 24 hours annually.
+
+I am interested in analyzing approved training events and hours offered per year. Since the number of required annual training hours has just recently doubled, I am interested in looking for any trends in the data, to determine if, without intervention, the number of training hours offered will be able to meet that that requirement. This has implications on training organizations and the early childhood system as a whole as to whether more investment needs to be put into creating new training events. Since online training has become more popular in recent years, I am also interested in analyzing training events by type (distance or classroom-based), to determine the effect online training has had on the number of training events offered. 
+
+In these analyses, I am primarily interested in an explanatory framework. I am interested in learning what factors have been important historically in predicting training events and training hours. 
+
+### Dataset
+
+The Practitioner Registry database contains historical data on training events submitted for approved from 1998 to present. This dataset contains the number of hours for each training event, whether the event was completed or not, and whether it was a classroom-based training or a distance training, i.e. online. Online training events have a different definition for the event date in this dataset, basically indicating that that training was available for one year prior to the end date. This is opposed to the end date for classroom-based training, which indicates the date the event occurred. 
+
+To gain an understanding of the dataset, I first aggregated the data by year and plotted the series. Counts of training events per year is shown in Figure 1, and total training hours offered per year is shown in Figure 2.
+
+```{r, echo = FALSE, fig.cap = "Figure 1. All approved and completed training events, aggregated by year. This dataset includes events from 2001 through 2017. Note the steep drop off from 2007 to 2010 due to the increasing availability of online training."}
+# create time series objects and plot full dataset to get overall perspective
+countYrTS <- ts(fullCountYr$numEvents, start = 2001)
+autoplot(countYrTS, ylim = c(0, 2500),
+         main = "Number of Training Events Offered Per Year") + ylab("Number of Training Events")
+```
+
+```{r, echo = FALSE, fig.cap = "Figure 2. Total training hours for approved and completed training events, aggregated by year. This dataset includes events from 2001 through 2017. Note the steep drop of availability from 2007 to 2010 due to the increase availability of online training."}
+hoursYrTS <- ts(hoursYr$totalHours, start = 2001)
+autoplot(hoursYrTS, ylim = c(0, 25000), 
+         main = "Total Training Hours Offered Per Year") + ylab("Number of Training Hours")
+```
+
+Online training started to become approved in 2005, and continued to increase in popularity until 2008. This is reflected in both Figure 1 and Figure 2, with the availability of training being offered dropping off steeply starting in 2007, and reaching a minimum in 2010. For this reason, and because I am interested in the more recent availability of training, I decided to subset the dataset to only consider training event approved from 2010 forward. Since online training has a different definition for the event date, I also decided to focus on classroom-based training. A plot of the dataset used in subsequent analyses is shown in Figure 3.
+
+```{r, echo = FALSE, fig.cap = "Figure 3. Classroom-Based Training Hours, aggregated by month. This series contains training hours from events approved and completed from January 2010 through June 2018. There appears to be a strong seasonal cycle."}
+# create time series of selected dataset
+hoursMonYrTS <- ts(hoursMonthYr$classroomHours, start = c(2010, 1), frequency = 12)
+autoplot(hoursMonYrTS, ylim = c(0, 1000), main = "Classroom-Based Training Hours Offered Per Month") + ylab("Number of Training Hours")
+```
+
+### Methods
+A decomposition of the time series was constructed to get an idea of the general structure of the series, as shown in Figure 4. There appears to be an overall slight increasing trend, and a clear seasonal cycle.
+
+```{r, echo = FALSE, fig.cap = "Figure 4. Decomposition of the classroom-based training hour time series. There appears to be as slight increasing trend, and a clear seasonal cycle."}
+# look at plots to get ideas for models
+plot(decompose(hoursMonYrTS))
+```
+
+Figures 5, 6, and 7 show the training data plotted as functions of theorized regressor variables. Possible regressor variable tested in this analysis included the year, and seasonal indicators for month of the year, shown in Figure 5. The month of the year could be important as some months are more popular for training. For example, July is typically a slower month as many people are on summer vacation, and August is when head starts begin their school year and have new staff training. Figure 6 shows monthly classroom training hours plotted by the number of hours offered for distance training in the previous year. Because the addition of online training had such an impact on the number of trainings offered historically, this could continue to have an effect. I am using lagged distance training (from one year previously), so that this variable could be included in future forecasting if necessary. 
+
+I also explored the possibility of including the number of annual training hours required for renewal on the Practitioner Registry as a possible regressor variable. A plot of this data is shown in Figure 7. The Practitioner Registry required 23 or 24 hours of training annually for many years, and roughly one-third of the workforce was participating in the registry by 2017. With such a higher standard than Child Care Licensing, and such a high percentage of the workforce participating, this could also have influnced the number of training hours being offered.
+
+```{r, echo = FALSE, fig.cap = "Figure 5. Total monthly classroom-based training hours plotted as a function of the year (left), and as a function of the month (right)."}
+par(mfrow = c(1, 2))
+
+plot(hoursMonthYr$classroomHours ~ hoursMonthYr$year, xlab = "Year", 
+     ylab = "Number of Training Hours", 
+     main = "Training Hours as a Function of the Year")
+
+plot(hoursMonthYr$classroomHours ~ hoursMonthYr$month, xlab = "Month of the Year", 
+     ylab = "Number of Training Hours", 
+     main = "Training Hours as a Function of the Month")
+```
+
+```{r, echo = FALSE, fig.cap = "Figure 6. Total monthly classroom-based training hours plotted as a function of the number of distance training hours offered the previous year."}
+plot(hoursMonthYr$classroomHours ~ hoursMonthYr$prevYrDist, 
+     xlab = "Total Distance Training Hours for Previous Year", ylab = "Number of Training Hours",
+     main = "Monthly Classroom-Based Training Hours \n by Previous Year's Distance Training Hours")
+```
+
+```{r, echo = FALSE, fig.cap = "Figure 7. Total monthly classroom-based training hours plotted by the number of hours required for renewal on the Practitioner Registry. There is no clear difference between the boxplots, other than slightly different distributions."}
+plot(hoursMonthYr$classroomHours ~ hoursMonthYr$PRRequire, ylab = "Number of Training Hours",
+     xlab = "Practitioner Registry Required Annual Training Hours",
+     main = "Monthly Classroom-Based Training Hours \n by Annual Training Requirement for Practitioner Registry")
+```
+
+I first fit simple regression models for each of the four variables mentioned above. Regression models for the year, lagged distance training hours, and required Practitioner Registry training hours were not significant, so they were eliminated from subsequent analyses. The model with monthly season indicators was significant and was compared to other types of models as discussed in the results section.
+
+A regression model with monthly seasonal indicators would be as follows:
+
+$$\hat{y_{training}} = \begin{cases} 
+      \beta_1 + z_t \\
+      \beta_2 + z_t \\
+      \vdots \\
+      \beta_{12} + z_t \\
+   \end{cases}$$
+
+where $\hat{y_{training}}$ is the predicted number of training hours offered, $z_t$ is the error term, and $\beta_i$ is the $i$th seasonal term. 
+
+I plotted the ACF and PACF to take a look at the autocorrelation of the time series. A plot of which can be seen in Figure 8. These plots show a clear correlation structure continuing throughout the plot, likely indicating a Moving Average process.
+
+```{r, echo = FALSE, fig.cap = "Figure 8. Autocorrelation function (left), and Partial autocorrelation function for the monthly training hour time series. There appears to be a correlation structure continuting out to a lag of 20 months."}
+# look at time series autocorrelation plots
+par(mfrow = c(1, 2))
+acf(ts(hoursMonthYr$classroomHours, start = c(2010, 1)), xlab = "Lag (months)", main = "")
+pacf(ts(hoursMonthYr$classroomHours, start = c(2010, 1)), xlab = "Lag (months)", main = "")
+
+```
+
+In R, `auto.arima` was used to select the best ARIMA model, which turned out to be a Moving Average process of order 4 with a mean term. A model was also fit using the monthly seasonal regression variables along with the MA(4) with mean term. An exponential smoothing state space model was also tested using `ets()` in R.
+
+### Results
+
+```{r, echo = FALSE}
+# fit regression models
+
+# lm on year -- not significant
+lmYear <- lm(classroomHours ~ year, data = hoursMonthYr)
+
+# lm on month
+lmMonth <- lm(classroomHours ~ month, data = hoursMonthYr)
+
+# lm on previous year distance training hours -- not significant
+lmPrevDist <- lm(classroomHours ~ prevYrDist, data = hoursMonthYr)
+
+# lm on practitioner registry required annual training hours -- not significant
+lmPRRequire <- lm(classroomHours ~ PRRequire, data = hoursMonthYr)
+```
+
+```{r, echo = FALSE}
+# monthly seasonal regression model output
+lmMonthSum <- summary(lmMonth)
+lmMonthSum
+```
+
+Above is the output from the regression model with monthly seasonal indicators. The overall model is significant with overall $F$ on `r lmMonthSum$fstatistic[2]` and `r lmMonthSum$fstatistic[3]` DF $=$ `r lmMonthSum$fstatistic[1]`, $p<0.0001$. Most months of the year are significant predictors, as is shown in the table.
+
+```{r, echo = FALSE}
+# use auto.arima to get best arima model
+arimaHrs <- auto.arima(hoursMonthYr$classroomHours)
+arimaHrs
+```
+
+The best fitting ARIMA model was a Moving Average process of order 4, with mean term. The output from that model is included above. Since that was the best ARIMA model, and the seasonal regression model was significant, an MA(4) with mean term and seasonal regression variables was also tested. Output from that model is included below.
+
+```{r, echo = FALSE}
+# arima(0, 0, 4) with monthly indicator regression variable
+arimaHrsMonth <- arima(hoursMonthYr$classroomHours, order = c(0, 0, 4), xreg = hoursMonthYr$month)
+arimaHrsMonth
+```
+
+The final model that was tested was the exponential smoothing state space model using `ets()`. The output from that model is included below.
+ 
+```{r, echo = FALSE}
+# fit exponential smoothing model
+# ets
+etsHrs <- ets(hoursMonYrTS)
+etsHrs
+```
+
+```{r, echo = FALSE}
+# compare models with aic
+aicResults <- AIC(etsHrs, lmMonth, arimaHrsMonth, arimaHrs)
+aicResults
+```
+
+These four models were tested using AIC to find the best performing model. The results of this comparison are shown above The exponential state space model was the worst performing with the highest AIC at `r aicResults$AIC[1]`. Both Moving Average models performed similarly, with the model that did not include the extra regression variables performing slightly better (`r aicResults$AIC[4]` compared to `r aicResults$AIC[3]`). The best performing model was the regression model with monthly seasonal indicators with an AIC of `r aicResults$AIC[2]`.
+
+Model diagnostics were run for the monthly seasonal regression model. Autocorrelation and partial autocorrelation functions for the model residuals are plotted in Figure 9. There is no autocorrelation or clear structure in these plots.
+
+```{r, echo = FALSE, fig.cap = "Figure 9. Autocorrelation function (left), and Partial autocorrelation function for the residuals of the regression model that includes monthly seasonal indicators to predict monthly classroom-based training hours. There is no significant autocorrelation or structure remaining in the residuals."}
+# model diagnostics
+par(mfrow = c(1, 2))
+acf(lmMonth$residuals, xlab = "Lag (months)", main = "")
+pacf(lmMonth$residuals, xlab = "Lag (months)", main = "")
+```
+
+### Conclusion
+The best model in predicting monthly classroom-based training hours is a regression model including indicators for each month of the year. A plot of predictions from this model overlaid on observed data is shown in Figure 10. 
+
+```{r, echo = FALSE, fig.cap = "Figure 10. Plot of classroom-based training hours offered per month, with observed data in black. The red line indicates the predicted training hours offered per month based on the regression model with monthly seasonal indicators."}
+# compare plots
+par(mfrow = c(1, 1))
+Predicted <- ts(lmMonth$fitted.values, start = c(2010, 1), frequency = 12)
+autoplot(hoursMonYrTS, ylab = "Number of Training Hours", ylim = c(0, 1000),
+         main = "Classroom-Based Training Hours Offered Per Month: \n Realized vs. Predicted") + autolayer(Predicted, lwd = 0.8)
+```
+
+This model makes sense in context. Training availability varies depending on the month of the year and often can fluctuate according to traditional school year. 
+
+If I were to conduct this analysis again, I would probably attempt to fit a model based on other seasonal cycles, like the four seasons of the year, or following the school year with indicators for summer. I would also try to incorporate other regression variables, such as the total number of child care providers in the field, training attendance numbers, or total number of training hours required for Montana Quality Rating Improvement System (QRIS) participants. 
+
+The effect of online training did turn out to have a dramatic effect. Future analyses could focus more on the time period of the shift from more classroom-based training to more online training to learn more about this effect. The fact that there was only a slight trend in the data demonstrates that the amount of training being offered currently may not suffice in meeting the coming increase in demand for training.
+
+\newpage
+
+### References
+- Child Care Aware of America (2015). *Child Care in the State of Montana.* Child Care Aware of America.
+- Cowpertwait, P.S.P. and Metcalfe, A.V. (2009). *Introductory Time Series with R*. New York,
+NY: Springer Science+Business Media, LLC.
+- Heckman, J.J. (2017). *There's More to Gain by Taking a Comprehensive Approach to Early Childhood Development.* Retrieved from https://heckmanequation.org/resource/research-summary-lifecycle-benefits-influential-early-childhood-program/
+- Nau, R. (2018). *Statistical Forecasting: Notes on regression and time series analysis* Retrieved from https://people.duke.edu/~rnau/411home.htm
+- OECD. Encouraging Quality in Early Childhood Education and Care (ECEC). OECD, Paris.
+- Watson, A. (2018, September). Child Care in Montana: Supporting Montana Families and Caring for the State's Most Precious Resource. *Montana Economy at a Glance.*
